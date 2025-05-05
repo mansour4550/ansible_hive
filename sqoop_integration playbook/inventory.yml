@@ -1,0 +1,18 @@
+---
+all:
+  hosts:
+    master1:
+      ansible_host: 192.168.10.110
+      ansible_user: root
+    master2:
+      ansible_host: 192.168.10.111
+      ansible_user: root
+    master3:
+      ansible_host: 192.168.10.112
+      ansible_user: root
+    edge1:
+      ansible_host: 192.168.10.113
+      ansible_user: root
+    slave1:
+      ansible_host: 192.168.10.115
+      ansible_user: root
