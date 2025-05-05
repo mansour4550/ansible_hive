@@ -1,0 +1,326 @@
+---
+- name: Install and Configure Apache Atlas on Hadoop Cluster
+  hosts: all
+  become: yes
+  vars:
+    atlas_version: 2.4.0
+    atlas_install_dir: /opt/apache-atlas-2.4.0
+    atlas_source_dir: /home/hadoopZetta/apache-atlas-sources-2.4.0
+    hbase_home_dir: /opt/hbase-2.5.5-hadoop3
+    kafka_home_dir: /opt/kafka
+    solr_version: 8.11.2
+    solr_install_dir: /opt/solr-8.11.2
+    hadoop_user: hadoopZetta
+    hadoop_group: hadoopZetta
+    zookeeper_quorum: "192.168.10.110:2181,192.168.10.111:2181,192.168.10.112:2181"
+    kafka_bootstrap_servers: "192.168.10.115:9092"
+    solr_url: "http://192.168.10.113:8983/solr"
+
+  tasks:
+    # Tasks on master1 and master2: Install and configure Atlas
+    - name: Download Apache Atlas source on master1 and master2
+      when: inventory_hostname in ['192.168.10.110', '192.168.10.111']
+      ansible.builtin.get_url:
+        url: "https://dlcdn.apache.org/atlas/{{ atlas_version }}/apache-atlas-{{ atlas_version }}-sources.tar.gz"
+        dest: "{{ atlas_source_dir }}/../apache-atlas-{{ atlas_version }}-sources.tar.gz"
+        owner: "{{ hadoop_user }}"
+        group: "{{ hadoop_group }}"
+        mode: '0644'
+
+    - name: Extract Apache Atlas source
+      when: inventory_hostname in ['192.168.10.110', '192.168.10.111']
+      ansible.builtin.unarchive:
+        src: "{{ atlas_source_dir }}/../apache-atlas-{{ atlas_version }}-sources.tar.gz"
+        dest: "{{ atlas_source_dir }}/../"
+        remote_src: yes
+        owner: "{{ hadoop_user }}"
+        group: "{{ hadoop_group }}"
+        mode: '0755'
+        creates: "{{ atlas_source_dir }}"
+
+    - name: Install Maven
+      when: inventory_hostname in ['192.168.10.110', '192.168.10.111']
+      ansible.builtin.apt:
+        name: maven
+        state: present
+        update_cache: yes
+
+    - name: Ensure Atlas source directory is writable
+      when: inventory_hostname in ['192.168.10.110', '192.168.10.111']
+      ansible.builtin.file:
+        path: "{{ atlas_source_dir }}"
+        owner: "{{ hadoop_user }}"
+        group: "{{ hadoop_group }}"
+        mode: 'u+rwx'
+        recurse: yes
+
+    - name: Build Apache Atlas with Maven
+      when: inventory_hostname in ['192.168.10.110', '192.168.10.111']
+      become_user: hadoopZetta
+      ansible.builtin.command:
+        cmd: mvn clean -DskipTests package -Pdist
+        chdir: "{{ atlas_source_dir }}"
+      environment:
+        MAVEN_OPTS: "-Xms2g -Xmx2g"
+      args:
+        creates: "{{ atlas_source_dir }}/distro/target/apache-atlas-{{ atlas_version }}-bin.tar.gz"
+
+    - name: Create Atlas install directory
+      when: inventory_hostname in ['192.168.10.110', '192.168.10.111']
+      ansible.builtin.file:
+        path: "{{ atlas_install_dir }}"
+        state: directory
+        owner: "{{ hadoop_user }}"
+        group: "{{ hadoop_group }}"
+        mode: '0755'
+
+    - name: Extract Apache Atlas binary to /opt
+      when: inventory_hostname in ['192.168.10.110', '192.168.10.111']
+      ansible.builtin.unarchive:
+        src: "{{ atlas_source_dir }}/distro/target/apache-atlas-{{ atlas_version }}-bin.tar.gz"
+        dest: "{{ atlas_install_dir }}"
+        remote_src: yes
+        owner: "{{ hadoop_user }}"
+        group: "{{ hadoop_group }}"
+        mode: '0755'
+        extra_opts: [--strip-components=1]
+        creates: "{{ atlas_install_dir }}/bin/atlas_start.py"
+
+    - name: Ensure Apache Atlas directory has correct ownership
+      when: inventory_hostname in ['192.168.10.110', '192.168.10.111']
+      ansible.builtin.file:
+        path: "{{ atlas_install_dir }}"
+        owner: "{{ hadoop_user }}"
+        group: "{{ hadoop_group }}"
+        mode: '0755'
+        recurse: yes
+
+    - name: Configure atlas-application.properties
+      when: inventory_hostname in ['192.168.10.110', '192.168.10.111']
+      ansible.builtin.copy:
+        content: |
+          ######### Graph Database Configs #########
+          atlas.graph.storage.backend=hbase
+          atlas.graph.storage.hostname={{ zookeeper_quorum }}
+          atlas.graph.storage.hbase.table=atlas
+          atlas.cluster.name=primary
+          atlas.server.ha.enabled=true
+          atlas.server.ids=id1,id2
+          atlas.server.address.id1=192.168.10.110:21000
+          atlas.server.address.id2=192.168.10.111:21000
+          atlas.hbase.hook.enabled=true
+          atlas.EntityAuditRepository.impl=org.apache.atlas.repository.audit.HBaseBasedAuditRepository
+          atlas.audit.hbase.tablename=apache_atlas_entity_audit
+          atlas.audit.zookeeper.session.timeout.ms=1000
+          atlas.audit.hbase.zookeeper.quorum={{ zookeeper_quorum }}
+
+          ######### Index Search Configs (Solr) #########
+          atlas.graph.index.search.backend=solr
+          atlas.graph.index.search.solr.mode=cloud
+          atlas.graph.index.search.solr.zookeeper-url={{ zookeeper_quorum }}
+          atlas.graph.index.search.solr.zookeeper-connect-timeout=60000
+          atlas.graph.index.search.solr.zookeeper-session-timeout=60000
+          atlas.graph.index.search.solr.wait-searcher=false
+
+          ######### Notification Configs (Kafka) #########
+          atlas.notification.embedded=false
+          atlas.kafka.zookeeper.connect={{ zookeeper_quorum }}
+          atlas.kafka.bootstrap.servers={{ kafka_bootstrap_servers }}
+          atlas.kafka.zookeeper.connection.timeout.ms=30000
+          atlas.kafka.zookeeper.session.timeout.ms=60000
+          atlas.kafka.zookeeper.sync.time.ms=20
+          atlas.kafka.hook.group.id=atlas
+          atlas.kafka.enable.auto.commit=false
+          atlas.kafka.auto.offset.reset=earliest
+          atlas.kafka.session.timeout.ms=30000
+          atlas.kafka.offsets.topic.replication.factor=1
+          atlas.kafka.poll.timeout.ms=1000
+          atlas.notification.create.topics=true
+          atlas.notification.replicas=1
+          atlas.notification.topics=ATLAS_HOOK,ATLAS_ENTITIES
+          atlas.notification.log.failed.messages=true
+          atlas.notification.consumer.retry.interval=500
+          atlas.notification.hook.retry.interval=1000
+
+          ######### Server Properties #########
+          atlas.server.http.port=21000
+          atlas.server.bind.address=0.0.0.0
+          atlas.rest.address=http://192.168.10.110:21000,http://192.168.10.111:21000
+
+          ######### Security Properties #########
+          atlas.enableTLS=false
+          atlas.authentication.method.file=true
+          atlas.authentication.method.file.filename={{ atlas_install_dir }}/conf/users-credentials.properties
+          atlas.authentication.method.kerberos=false
+          atlas.authentication.method.ldap.type=none
+        dest: "{{ atlas_install_dir }}/conf/atlas-application.properties"
+        owner: "{{ hadoop_user }}"
+        group: "{{ hadoop_group }}"
+        mode: '0644'
+
+    - name: Configure atlas-env.sh
+      when: inventory_hostname in ['192.168.10.110', '192.168.10.111']
+      ansible.builtin.copy:
+        content: |
+          #!/bin/bash
+          export JAVA_HOME=/usr/lib/jvm/java-8-openjdk-amd64
+          export ATLAS_HOME_DIR={{ atlas_install_dir }}
+          export ATLAS_LOG_DIR={{ atlas_install_dir }}/logs
+          export ATLAS_PID_DIR={{ atlas_install_dir }}/logs
+          export ATLAS_DATA_DIR={{ atlas_install_dir }}/data
+          export ATLAS_OPTS="-Djanusgraph.index.search.solr.mode=http -Djanusgraph.index.search.solr.http-urls={{ solr_url }}"
+          export ATLAS_SERVER_OPTS="-server -XX:SoftRefLRUPolicyMSPerMB=0 -XX:+CMSClassUnloadingEnabled -XX:+UseConcMarkSweepGC -XX:+CMSParallelRemarkEnabled -XX:+PrintTenuringDistribution -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath={{ atlas_install_dir }}/logs/dumps/atlas_server.hprof -Xloggc:{{ atlas_install_dir }}/logs/gc-worker.log -verbose:gc -XX:+UseGCLogFileRotation -XX:NumberOfGCLogFiles=10 -XX:GCLogFileSize=1m -XX:+PrintGCDetails -XX:+PrintHeapAtGC -XX:+PrintGCTimeStamps"
+          export ATLAS_SERVER_HEAP="-Xms4g -Xmx4g -XX:MaxNewSize=1g -XX:MetaspaceSize=256m -XX:MaxMetaspaceSize=512m"
+          export MANAGE_LOCAL_HBASE=false
+          export HBASE_CONF_DIR={{ atlas_install_dir }}/conf/hbase
+          export MANAGE_LOCAL_SOLR=false
+          export MANAGE_EMBEDDED_CASSANDRA=false
+          export MANAGE_LOCAL_ELASTICSEARCH=false
+        dest: "{{ atlas_install_dir }}/conf/atlas-env.sh"
+        owner: "{{ hadoop_user }}"
+        group: "{{ hadoop_group }}"
+        mode: '0755'
+
+    - name: Copy hbase-site.xml to Atlas conf/hbase directory
+      when: inventory_hostname in ['192.168.10.110', '192.168.10.111']
+      ansible.builtin.copy:
+        src: "{{ hbase_home_dir }}/conf/hbase-site.xml"
+        dest: "{{ atlas_install_dir }}/conf/hbase/hbase-site.xml"
+        owner: "{{ hadoop_user }}"
+        group: "{{ hadoop_group }}"
+        mode: '0644'
+
+    # Tasks on master1: Grant HBase permissions
+    - name: Grant atlas user permissions in HBase
+      when: inventory_hostname == '192.168.10.110'
+      become_user: hadoopZetta
+      ansible.builtin.shell: |
+        echo "grant 'atlas', 'RWXCA', 'atlas'" | {{ hbase_home_dir }}/bin/hbase shell
+      changed_when: false
+
+    # Tasks on edge1: Install and configure Solr
+    - name: Download Solr on edge1
+      when: inventory_hostname == '192.168.10.113'
+      ansible.builtin.get_url:
+        url: "https://downloads.apache.org/solr/solr/{{ solr_version }}/solr-{{ solr_version }}.tgz"
+        dest: "{{ solr_install_dir }}/../solr-{{ solr_version }}.tgz"
+        owner: "{{ hadoop_user }}"
+        group: "{{ hadoop_group }}"
+        mode: '0644'
+
+    - name: Extract Solr
+      when: inventory_hostname == '192.168.10.113'
+      ansible.builtin.unarchive:
+        src: "{{ solr_install_dir }}/../solr-{{ solr_version }}.tgz"
+        dest: "{{ solr_install_dir }}/../"
+        remote_src: yes
+        owner: "{{ hadoop_user }}"
+        group: "{{ hadoop_group }}"
+        mode: '0755'
+        creates: "{{ solr_install_dir }}"
+
+    - name: Move Solr to final location
+      when: inventory_hostname == '192.168.10.113'
+      ansible.builtin.command:
+        cmd: mv solr-{{ solr_version }} {{ solr_install_dir }}
+        chdir: "{{ solr_install_dir }}/../"
+      args:
+        creates: "{{ solr_install_dir }}/bin/solr"
+
+    - name: Start Solr in cloud mode
+      when: inventory_hostname == '192.168.10.113'
+      become_user: hadoopZetta
+      ansible.builtin.command: "{{ solr_install_dir }}/bin/solr start -cloud -z '{{ zookeeper_quorum }}' -p 8983"
+      args:
+        creates: "{{ solr_install_dir }}/server/logs/solr.log"
+
+    - name: Create Solr collections
+      when: inventory_hostname == '192.168.10.113'
+      become_user: hadoopZetta
+      ansible.builtin.command: "{{ solr_install_dir }}/bin/solr create -c {{ item }} -n data-driven-schema-configs"
+      loop:
+        - vertex_index
+        - edge_index
+        - fulltext_index
+      changed_when: false
+
+    - name: Verify Solr collections
+      when: inventory_hostname == '192.168.10.113'
+      become_user: hadoopZetta
+      ansible.builtin.command: curl "{{ solr_url }}/admin/collections?action=LIST"
+      register: solr_collections
+      changed_when: false
+
+    - name: Display Solr collections
+      when: inventory_hostname == '192.168.10.113'
+      ansible.builtin.debug:
+        msg: "{{ solr_collections.stdout }}"
+
+    # Tasks on slave1: Configure Kafka and create topics
+    - name: Ensure Kafka server.properties is configured
+      when: inventory_hostname == '192.168.10.115'
+      ansible.builtin.blockinfile:
+        path: "{{ kafka_home_dir }}/config/server.properties"
+        block: |
+          zookeeper.connect={{ zookeeper_quorum }}
+          listeners=PLAINTEXT://192.168.10.115:9092
+          advertised.listeners=PLAINTEXT://192.168.10.115:9092
+        marker: "# {mark} ANSIBLE MANAGED BLOCK"
+        owner: "{{ hadoop_user }}"
+        group: "{{ hadoop_group }}"
+        mode: '0644'
+
+    - name: Stop Kafka server
+      when: inventory_hostname == '192.168.10.115'
+      ansible.builtin.command: "{{ kafka_home_dir }}/bin/kafka-server-stop.sh"
+      ignore_errors: yes
+
+    - name: Wait for Kafka to stop
+      when: inventory_hostname == '192.168.10.115'
+      ansible.builtin.pause:
+        seconds: 5
+
+    - name: Start Kafka server
+      when: inventory_hostname == '192.168.10.115'
+      become_user: hadoopZetta
+      ansible.builtin.command: "{{ kafka_home_dir }}/bin/kafka-server-start.sh -daemon {{ kafka_home_dir }}/config/server.properties"
+      args:
+        creates: "{{ kafka_home_dir }}/logs/kafkaServer.out"
+
+    - name: Create Kafka topics
+      when: inventory_hostname == '192.168.10.115'
+      become_user: hadoopZetta
+      ansible.builtin.command: "{{ kafka_home_dir }}/bin/kafka-topics.sh --create --topic {{ item }} --bootstrap-server {{ kafka_bootstrap_servers }} --partitions 1 --replication-factor 1"
+      loop:
+        - ATLAS_HOOK
+        - ATLAS_ENTITIES
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Verify Kafka topics
+      when: inventory_hostname == '192.168.10.115'
+      become_user: hadoopZetta
+      ansible.builtin.command: "{{ kafka_home_dir }}/bin/kafka-topics.sh --describe --topic {{ item }} --bootstrap-server {{ kafka_bootstrap_servers }}"
+      loop:
+        - ATLAS_HOOK
+        - ATLAS_ENTITIES
+      register: kafka_topics
+      changed_when: false
+
+    - name: Display Kafka topics
+      when: inventory_hostname == '192.168.10.115'
+      ansible.builtin.debug:
+        msg: "{{ kafka_topics.results | map(attribute='stdout') | list }}"
+
+    # Tasks on master1 and master2: Start Atlas
+    - name: Start Atlas server
+      when: inventory_hostname in ['192.168.10.110', '192.168.10.111']
+      become_user: hadoopZetta
+      ansible.builtin.command: "{{ atlas_install_dir }}/bin/atlas_start.py"
+      async: 45
+      poll: 0
+
+    - name: Display Atlas UI verification message
+      when: inventory_hostname == '192.168.10.110'
+      ansible.builtin.debug:
+        msg: "Verify in Atlas UI at http://192.168.10.110:21000 or http://192.168.10.111:21000"

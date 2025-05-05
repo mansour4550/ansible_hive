@@ -1,0 +1,190 @@
+---
+- name: Integrate HBase with Apache Atlas
+  hosts: all
+  become: yes
+  vars:
+    atlas_tarball: apache-atlas-2.4.0-hbase-hook.tar.gz
+    atlas_install_dir: /opt/apache-atlas-2.4.0
+    hbase_home_dir: /opt/hbase-2.5.5-hadoop3
+    hadoop_user: hadoopZetta
+    hadoop_group: hadoopZetta
+    atlas_source_dir: /home/hadoopZetta
+
+  tasks:
+    # Tasks on master1: Transfer files to edge1
+    - name: Transfer tarball and atlas-application.properties from master1 to edge1
+      when: inventory_hostname == '192.168.10.110'
+      become_user: hadoopZetta
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "/home/{{ hadoop_user }}/{{ item.dest }}"
+        mode: '0644'
+      loop:
+        - { src: '{{ atlas_source_dir }}/{{ atlas_tarball }}', dest: '{{ atlas_tarball }}' }
+        - { src: '{{ atlas_install_dir }}/conf/atlas-application.properties', dest: 'atlas-application.properties' }
+      delegate_to: 192.168.10.113
+
+    # Tasks on edge1
+    - name: Verify tarball on edge1
+      when: inventory_hostname == '192.168.10.113'
+      become_user: hadoopZetta
+      ansible.builtin.stat:
+        path: "{{ atlas_source_dir }}/{{ atlas_tarball }}"
+      register: tarball_stat
+
+    - name: Fail if tarball is missing
+      when: inventory_hostname == '192.168.10.113'
+      ansible.builtin.fail:
+        msg: "Tarball {{ atlas_tarball }} not found on edge1"
+      when: not tarball_stat.stat.exists
+
+    - name: Extract Atlas HBase hook tarball
+      when: inventory_hostname == '192.168.10.113'
+      ansible.builtin.unarchive:
+        src: "{{ atlas_source_dir }}/{{ atlas_tarball }}"
+        dest: /opt/
+        owner: "{{ hadoop_user }}"
+        group: "{{ hadoop_group }}"
+        mode: '0755'
+        creates: "{{ atlas_install_dir }}/hook/hbase"
+
+    - name: Create Atlas HBase hook directory
+      when: inventory_hostname == '192.168.10.113'
+      ansible.builtin.file:
+        path: "{{ atlas_install_dir }}/hook/hbase"
+        state: directory
+        owner: "{{ hadoop_user }}"
+        group: "{{ hadoop_group }}"
+        mode: '0755'
+
+    - name: Copy HBase hook files to Atlas hook directory
+      when: inventory_hostname == '192.168.10.113'
+      ansible.builtin.copy:
+        src: "/opt/apache-atlas-hbase-hook-2.4.0/hook/hbase/"
+        dest: "{{ atlas_install_dir }}/hook/hbase/"
+        owner: "{{ hadoop_user }}"
+        group: "{{ hadoop_group }}"
+        mode: '0755'
+
+    - name: Copy HBase hook JARs to HBase lib directory
+      when: inventory_hostname == '192.168.10.113'
+      ansible.builtin.copy:
+        src: "{{ atlas_install_dir }}/hook/hbase/"
+        dest: "{{ hbase_home_dir }}/lib/"
+        owner: "{{ hadoop_user }}"
+        group: "{{ hadoop_group }}"
+        mode: '0755'
+
+    - name: Copy atlas-application.properties to HBase conf
+      when: inventory_hostname == '192.168.10.113'
+      ansible.builtin.copy:
+        src: "{{ atlas_source_dir }}/atlas-application.properties"
+        dest: "{{ hbase_home_dir }}/conf/atlas-application.properties"
+        owner: "{{ hadoop_user }}"
+        group: "{{ hadoop_group }}"
+        mode: '0644'
+
+    - name: Update atlas-application.properties with new IP addresses
+      when: inventory_hostname == '192.168.10.113'
+      ansible.builtin.blockinfile:
+        path: "{{ hbase_home_dir }}/conf/atlas-application.properties"
+        block: |
+          atlas.graph.storage.hostname=192.168.10.115:2181
+          atlas [WARNING]: Error fetching inventory for host edge1: {'changed': False, 'msg': 'Failed to connect to the host via ssh: ssh: connect to host 192.168.10.113 port 22: Connection timed out', 'unreachable': True}
+          atlas.kafka.zookeeper.connect=192.168.10.115:2181
+          atlas.kafka.bootstrap.servers=192.168.10.115:9092
+          atlas.graph.index.search.solr.zookeeper-url=192.168.10.115:2181
+          atlas.graph.index.search.solr.http-urls=http://192.168.10.115:8983/solr
+          atlas.server.address.id1=192.168.10.110:21000
+          atlas.server.address.id2=192.168.10.111:21000
+        marker: "# {mark} ANSIBLE MANAGED BLOCK"
+
+    - name: Set HBASE_AUX_JARS_PATH in hbase-env.sh
+      when: inventory_hostname == '192.168.10.113'
+      ansible.builtin.lineinfile:
+        path: "{{ hbase_home_dir }}/conf/hbase-env.sh"
+        line: "export HBASE_CLASSPATH={{ atlas_install_dir }}/hook/hbase"
+        create: yes
+        state: present
+        owner: "{{ hadoop_user }}"
+        group: "{{ hadoop_group }}"
+        mode: '0755'
+
+    - name: Add Atlas HBase hook to hbase-site.xml
+      when: inventory_hostname == '192.168.10.113'
+      ansible.builtin.lineinfile:
+        path: "{{ hbase_home_dir }}/conf/hbase-site.xml"
+        line: |
+          <property>
+            <name>hbase.coprocessor.master.classes</name>
+            <value>org.apache.atlas.hbase.hook.HBaseAtlasCoprocessor</value>
+          </property>
+        insertbefore: '</configuration>'
+        state: present
+        create: yes
+        owner: "{{ hadoop_user }}"
+        group: "{{ hadoop_group }}"
+        mode: '0644'
+
+    - name: Create Atlas hook-bin directory
+      when: inventory_hostname == '192.168.10.113'
+      ansible.builtin.file:
+        path: "{{ atlas_install_dir }}/hook-bin"
+        state: directory
+        owner: "{{ hadoop_user }}"
+        group: "{{ hadoop_group }}"
+        mode: '0755'
+
+    - name: Copy import-hbase.sh to hook-bin
+      when: inventory_hostname == '192.168.10.113'
+      ansible.builtin.copy:
+        src: "/opt/apache-atlas-hbase-hook-2.4.0/hook-bin/import-hbase.sh"
+        dest: "{{ atlas_install_dir }}/hook-bin/import-hbase.sh"
+        owner: "{{ hadoop_user }}"
+        group: "{{ hadoop_group }}"
+        mode: '0755'
+
+    - name: Stop HBase HMaster on master1
+      when: inventory_hostname == '192.168.10.110'
+      ansible.builtin.command: "{{ hbase_home_dir }}/bin/stop-hbase.sh"
+      ignore_errors: yes
+
+    - name: Stop HBase RegionServers on master2 and master3
+      when: inventory_hostname in ['192.168.10.111', '192.168.10.112']
+      ansible.builtin.command: "{{ hbase_home_dir }}/bin/hbase-daemon.sh stop regionserver"
+      ignore_errors: yes
+
+    - name: Start HBase HMaster on master1
+      when: inventory_hostname == '192.168.10.110'
+      ansible.builtin.command: "{{ hbase_home_dir }}/bin/start-hbase.sh"
+      async: 45
+      poll: 0
+
+    - name: Start HBase RegionServers on master2 and master3
+      when: inventory_hostname in ['192.168.10.111', '192.168.10.112']
+      ansible.builtin.command: "{{ hbase_home_dir }}/bin/hbase-daemon.sh start regionserver"
+      async: 45
+      poll: 0
+
+    - name: Test HBase by creating a test table
+      when: inventory_hostname == '192.168.10.113'
+      become_user: hadoopZetta
+      ansible.builtin.shell: |
+        echo -e "create 'test_table', 'cf'" | {{ hbase_home_dir }}/bin/hbase shell
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Import HBase metadata to Atlas
+      when: inventory_hostname == '192.168.10.113'
+      become_user: hadoopZetta
+      ansible.builtin.shell: |
+        export HBASE_HOME={{ hbase_home_dir }}
+        export ATLAS_HOME={{ atlas_install_dir }}
+        {{ atlas_install_dir }}/hook-bin/import-hbase.sh
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Display Atlas UI verification message
+      when: inventory_hostname == '192.168.10.113'
+      ansible.builtin.debug:
+        msg: "Verify in Atlas UI at http://192.168.10.110:21000 or http://192.168.10.111:21000"
