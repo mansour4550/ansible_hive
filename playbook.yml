@@ -224,8 +224,6 @@
         CREATE TABLE test255 (id INT);
         EOF
       changed_when: false
-
-died: 0
       ignore_errors: yes
 
     - name: Import Hive metadata to Atlas
