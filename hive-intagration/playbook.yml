@@ -6,18 +6,20 @@
     atlas_tarball: apache-atlas-2.4.0-hive-hook.tar.gz
     atlas_install_dir: /opt/apache-atlas-2.4.0
     hive_install_dir: /opt/apache-hive-3.1.3-bin
-    hadoop_user: hadoopZetta
-    hadoop_group: hadoopZetta
     atlas_source_dir: /home/hadoopZetta
+    zookeeper_quorum: "192.168.10.110:2181,192.168.10.111:2181,192.168.10.112:2181"
+    kafka_bootstrap_servers: "192.168.10.113:9092"
+    solr_url: "http://192.168.10.113:8983/solr"
 
   tasks:
     # Tasks on master1: Transfer files to edge1
     - name: Transfer tarball and atlas-application.properties from master1 to edge1
       when: inventory_hostname == '192.168.10.110'
-      become_user: hadoopZetta
       ansible.builtin.copy:
         src: "{{ item.src }}"
-        dest: "/home/{{ hadoop_user }}/{{ item.dest }}"
+        dest: "/home/hadoopZetta/{{ item.dest }}"
+        owner: root
+        group: root
         mode: '0644'
       loop:
         - { src: '{{ atlas_source_dir }}/{{ atlas_tarball }}', dest: '{{ atlas_tarball }}' }
@@ -27,7 +29,6 @@
     # Tasks on edge1
     - name: Verify tarball on edge1
       when: inventory_hostname == '192.168.10.113'
-      become_user: hadoopZetta
       ansible.builtin.stat:
         path: "{{ atlas_source_dir }}/{{ atlas_tarball }}"
       register: tarball_stat
@@ -43,8 +44,8 @@
       ansible.builtin.unarchive:
         src: "{{ atlas_source_dir }}/{{ atlas_tarball }}"
         dest: /opt/
-        owner: "{{ hadoop_user }}"
-        group: "{{ hadoop_group }}"
+        owner: root
+        group: root
         mode: '0755'
         creates: "{{ atlas_install_dir }}/hook"
 
@@ -53,8 +54,8 @@
       ansible.builtin.file:
         path: "{{ atlas_install_dir }}/hook"
         state: directory
-        owner: "{{ hadoop_user }}"
-        group: "{{ hadoop_group }}"
+        owner: root
+        group: root
         mode: '0755'
 
     - name: Create Atlas Hive hook subdirectory
@@ -62,8 +63,8 @@
       ansible.builtin.file:
         path: "{{ atlas_install_dir }}/hook/hive"
         state: directory
-        owner: "{{ hadoop_user }}"
-        group: "{{ hadoop_group }}"
+        owner: root
+        group: root
         mode: '0755'
 
     - name: Copy Hive hook files to Atlas
@@ -71,8 +72,8 @@
       ansible.builtin.copy:
         src: "/opt/apache-atlas-hive-hook-2.4.0/hook/hive/"
         dest: "{{ atlas_install_dir }}/hook/hive/"
-        owner: "{{ hadoop_user }}"
-        group: "{{ hadoop_group }}"
+        owner: root
+        group: root
         mode: '0755'
 
     - name: Copy hook JARs to Hive lib
@@ -80,8 +81,8 @@
       ansible.builtin.copy:
         src: "{{ atlas_install_dir }}/hook/hive/{{ item }}"
         dest: "{{ hive_install_dir }}/lib/{{ item }}"
-        owner: "{{ hadoop_user }}"
-        group: "{{ hadoop_group }}"
+        owner: root
+        group: root
         mode: '0644'
       loop:
         - atlas-hive-hook-2.4.0.jar
@@ -93,8 +94,8 @@
       ansible.builtin.copy:
         src: "{{ atlas_install_dir }}/hook/hive/atlas-hive-plugin-impl/"
         dest: "{{ hive_install_dir }}/lib/atlas-hive-plugin-impl/"
-        owner: "{{ hadoop_user }}"
-        group: "{{ hadoop_group }}"
+        owner: root
+        group: root
         mode: '0755'
 
     - name: Set hive.security.authorization.enabled to false
@@ -104,7 +105,7 @@
         regexp: '(<property>\s*<name>hive\.security\.authorization\.enabled</name>\s*<value>)true(</value>\s*</property>)'
         replace: '\1false\2'
         backup: yes
-      ignore_errors: yes # In case the property doesn't exist
+      ignore_errors: yes
 
     - name: Add Atlas Hive hook to hive-site.xml
       when: inventory_hostname == '192.168.10.113'
@@ -118,8 +119,8 @@
         insertbefore: '</configuration>'
         state: present
         create: yes
-        owner: "{{ hadoop_user }}"
-        group: "{{ hadoop_group }}"
+        owner: root
+        group: root
         mode: '0644'
 
     - name: Set HIVE_AUX_JARS_PATH in hive-env.sh
@@ -129,8 +130,8 @@
         line: "export HIVE_AUX_JARS_PATH={{ atlas_install_dir }}/hook/hive"
         state: present
         create: yes
-        owner: "{{ hadoop_user }}"
-        group: "{{ hadoop_group }}"
+        owner: root
+        group: root
         mode: '0755'
 
     - name: Copy atlas-application.properties to Hive conf
@@ -138,31 +139,34 @@
       ansible.builtin.copy:
         src: "{{ atlas_source_dir }}/atlas-application.properties"
         dest: "{{ hive_install_dir }}/conf/atlas-application.properties"
-        owner: "{{ hadoop_user }}"
-        group: "{{ hadoop_group }}"
+        owner: root
+        group: root
         mode: '0644'
 
-    - name: Update atlas-application.properties with new IP addresses
+    - name: Update atlas-application.properties with correct IP addresses
       when: inventory_hostname == '192.168.10.113'
       ansible.builtin.blockinfile:
         path: "{{ hive_install_dir }}/conf/atlas-application.properties"
         block: |
-          atlas.graph.storage.hostname=192.168.10.115:2181
-          atlas.kafka.zookeeper.connect=192.168.10.115:2181
-          atlas.kafka.bootstrap.servers=192.168.10.115:9092
-          atlas.graph.index.search.solr.zookeeper-url=192.168.10.115:2181
-          atlas.graph.index.search.solr.http-urls=http://192.168.10.115:8983/solr
+          atlas.graph.storage.hostname={{ zookeeper_quorum }}
+          atlas.kafka.zookeeper.connect={{ zookeeper_quorum }}
+          atlas.kafka.bootstrap.servers={{ kafka_bootstrap_servers }}
+          atlas.graph.index.search.solr.zookeeper-url={{ zookeeper_quorum }}
+          atlas.graph.index.search.solr.http-urls={{ solr_url }}
           atlas.server.address.id1=192.168.10.110:21000
           atlas.server.address.id2=192.168.10.111:21000
         marker: "# {mark} ANSIBLE MANAGED BLOCK"
+        owner: root
+        group: root
+        mode: '0644'
 
     - name: Create Atlas hook-bin directory
       when: inventory_hostname == '192.168.10.113'
       ansible.builtin.file:
         path: "{{ atlas_install_dir }}/hook-bin"
         state: directory
-        owner: "{{ hadoop_user }}"
-        group: "{{ hadoop_group }}"
+        owner: root
+        group: root
         mode: '0755'
 
     - name: Download log4j JAR
@@ -170,8 +174,8 @@
       ansible.builtin.get_url:
         url: http://archive.apache.org/dist/logging/log4j/1.2.17/log4j-1.2.17.jar
         dest: "{{ atlas_install_dir }}/hook-bin/log4j-1.2.17.jar"
-        owner: "{{ hadoop_user }}"
-        group: "{{ hadoop_group }}"
+        owner: root
+        group: root
         mode: '0644'
 
     - name: Download slf4j-log4j12 JAR
@@ -179,8 +183,8 @@
       ansible.builtin.get_url:
         url: https://repo1.maven.org/maven2/org/slf4j/slf4j-log4j12/1.7.30/slf4j-log4j12-1.7.30.jar
         dest: "{{ atlas_install_dir }}/hook-bin/slf4j-log4j12-1.7.30.jar"
-        owner: "{{ hadoop_user }}"
-        group: "{{ hadoop_group }}"
+        owner: root
+        group: root
         mode: '0644'
 
     - name: Copy import-hive.sh to hook-bin
@@ -188,13 +192,13 @@
       ansible.builtin.copy:
         src: "/opt/apache-atlas-hive-hook-2.4.0/hook-bin/import-hive.sh"
         dest: "{{ atlas_install_dir }}/hook-bin/import-hive.sh"
-        owner: "{{ hadoop_user }}"
-        group: "{{ hadoop_group }}"
+        owner: root
+        group: root
         mode: '0755'
 
     - name: Stop HiveServer2 on edge1
       when: inventory_hostname == '192.168.10.113'
-      ansible.builtin.command: pkill -f HiveServer2
+      ansible.builtin.command: "{{ hive_install_dir }}/bin/hive --service hiveserver2 --stop"
       ignore_errors: yes
 
     - name: Start HiveServer2 on edge1
@@ -205,7 +209,7 @@
 
     - name: Stop Hive Metastore on master nodes
       when: inventory_hostname in ['192.168.10.110', '192.168.10.111', '192.168.10.112']
-      ansible.builtin.command: pkill -f HiveMetastore
+      ansible.builtin.command: "{{ hive_install_dir }}/bin/hive --service metastore --stop"
       ignore_errors: yes
 
     - name: Start Hive Metastore on master nodes
@@ -216,26 +220,5 @@
 
     - name: Test Hive by creating a test database and table
       when: inventory_hostname == '192.168.10.113'
-      become_user: hadoopZetta
       ansible.builtin.shell: |
-        hive <<EOF
-        CREATE DATABASE test_db;
-        USE test_db;
-        CREATE TABLE test255 (id INT);
-        EOF
-      changed_when: false
-      ignore_errors: yes
-
-    - name: Import Hive metadata to Atlas
-      when: inventory_hostname == '192.168.10.113'
-      become_user: hadoopZetta
-      ansible.builtin.shell: |
-        export HIVE_HOME={{ hive_install_dir }}
-        export ATLAS_HOME={{ atlas_install_dir }}
-        {{ atlas_install_dir }}/hook-bin/import-hive.sh
-      changed_when: false
-
-    - name: Display Atlas UI verification message
-      when: inventory_hostname == '192.168.10.113'
-      ansible.builtin.debug:
-        msg: "Verify in Atlas UI at http://192.168.10.110:21000 or http://192.168.10.111:21000"
+        {{ hive_install_dir }}/bin/hive <<EOF
